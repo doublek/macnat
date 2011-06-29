@@ -142,7 +142,7 @@ void receive_packet()
     struct packet_mreq mreq;
     int recv_sock, ifindex, protocol;
 
-    unsigned char buffer[4096];
+    unsigned char buffer[ETH_FRAME_LEN];
     struct ethhdr *hdr;
 
     /* FIXME: Hardcoded... Sigh...*/
