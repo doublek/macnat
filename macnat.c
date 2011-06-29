@@ -39,7 +39,7 @@ char * random_chars(char *dst, int size)
     static const len = 2;
     int i, r;
 
-    for(i=0; i<len; ++i)
+    for (i=0; i<len; ++i)
     {
         r = (int)((double)rand() / ((double)RAND_MAX + 1) * (sizeof(allowable_chars) -1 ));
         dst[i] = allowable_chars[r];
@@ -74,7 +74,7 @@ void modify_and_send_packet(void *packet)
      * We use 2 sockets because we will (probably) receive packets via one
      * interface and send via another interface.
      */
-    if((send_sock = socket(PF_PACKET, SOCK_RAW, protocol)) == -1) {
+    if ((send_sock = socket(PF_PACKET, SOCK_RAW, protocol)) == -1) {
         perror("socket");
         exit(1);
     }
@@ -82,7 +82,7 @@ void modify_and_send_packet(void *packet)
     mreq.mr_ifindex = ifindex;
     mreq.mr_type = PACKET_MR_PROMISC;
 
-    if(setsockopt(send_sock, SOL_SOCKET, PACKET_ADD_MEMBERSHIP, (void *)&mreq, sizeof(mreq)) == -1) {
+    if (setsockopt(send_sock, SOL_SOCKET, PACKET_ADD_MEMBERSHIP, (void *)&mreq, sizeof(mreq)) == -1) {
         perror("setsockopt");
         exit(1);
     }
@@ -100,7 +100,7 @@ void print_mac_address(unsigned char *addr)
 {
     int i;
     printf("%02x", addr[0]);
-    for(i=1; i<ETH_ALEN; ++i)
+    for (i=1; i<ETH_ALEN; ++i)
         printf(":%02x", addr[i]);
 }
 
@@ -124,28 +124,29 @@ void receive_packet()
     sdl.sll_pkttype = 0; /* Will be filled for us */
     /* sdl.sll_halen and sdl.sll_addr not required for receiveing */
 
-    if((recv_sock = socket(PF_PACKET, SOCK_RAW, protocol)) == -1) {
+    if ((recv_sock = socket(PF_PACKET, SOCK_RAW, protocol)) == -1) {
         perror("socket");
         exit(1);
     }
 
+    /* Set interface to promisuous mode.*/
     mreq.mr_ifindex = ifindex;
     mreq.mr_type = PACKET_MR_PROMISC;
 
-    if(setsockopt(recv_sock, SOL_SOCKET, PACKET_ADD_MEMBERSHIP, (void *)&mreq, sizeof(mreq)) == -1) {
+    if (setsockopt(recv_sock, SOL_SOCKET, PACKET_ADD_MEMBERSHIP, (void *)&mreq, sizeof(mreq)) == -1) {
         perror("setsockopt");
         exit(1);
     }
 
 #if 0
     /* TODO: Nice value for buf. */
-    if(setsockopt(recv_sock, SOL_SOCKET, SO_RCVBUF , NULL, 0) == -1) {
+    if (setsockopt(recv_sock, SOL_SOCKET, SO_RCVBUF , NULL, 0) == -1) {
         perror("setsockopt");
         exit(1);
     }
 #endif
 
-    if(bind(recv_sock, (struct sockaddr *)&sdl, sizeof(sdl)) == -1) {
+    if (bind(recv_sock, (struct sockaddr *)&sdl, sizeof(sdl)) == -1) {
         perror("bind");
         exit(1);
     }
