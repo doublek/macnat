@@ -23,6 +23,8 @@
 #include <string.h>
 #include <time.h>
 
+#include <event2/event.h>
+
 #include <net/ethernet.h>
 #include <net/if_arp.h>
 #include <net/if.h>
@@ -34,6 +36,8 @@
 #include <sys/socket.h>
 
 #include "macnat.h"
+
+#define PROTO_TO_USE ETH_P_ARP|ETH_P_IP
 
 char * random_chars(char *dst, int size);
 void print_mac_address(unsigned char *addr);
@@ -69,7 +73,7 @@ int macnat_create_and_bind_socket(int ifindex, struct sockaddr_ll sdl)
     struct packet_mreq mreq;
     int sock;
 
-    int protocol = htons(ETH_P_ALL);
+    int protocol = htons(PROTO_TO_USE);
 
     if ((sock = socket(PF_PACKET, SOCK_RAW, protocol)) == -1) {
         perror("socket");
@@ -108,7 +112,7 @@ void initialize_server_socket(const char *ifname)
 
     /* FIXME: Hardcoded... Sigh.... */
     ifindex = if_nametoindex(ifname);
-    protocol = htons(ETH_P_ALL);
+    protocol = htons(PROTO_TO_USE);
 
     sdl.sll_family = AF_PACKET;
     sdl.sll_halen = ETH_ALEN; /* FIXME: Magic number */
@@ -131,7 +135,7 @@ void initialize_client_socket(const char *ifname)
     int ifindex, protocol;
 
     ifindex = if_nametoindex(ifname);
-    protocol = htons(ETH_P_ALL);
+    protocol = htons(PROTO_TO_USE);
 
     sdl.sll_family = AF_PACKET;
     sdl.sll_protocol = protocol;
@@ -152,6 +156,39 @@ void cleanup_on_exit()
 {
     close(server_sock);
     close(client_sock);
+}
+
+void replace_with_original_and_send_packet(void *packet)
+{
+    char original_mac_addr[] = "00:0b:5d:8d:6f:c7";
+
+    struct ethhdr *original_hdr = (struct ethhdr *)packet;
+    void *ip_packet = packet + sizeof(struct ethhdr *);
+    
+    char outgoing_packet[ETH_FRAME_LEN];
+    struct ethhdr *hdr = (struct ethhdr *)outgoing_packet;
+    void *outgoing_ip_packet = outgoing_packet + sizeof(hdr);
+
+    memset(outgoing_packet, 0, ETH_FRAME_LEN);
+    memcpy(outgoing_ip_packet, ip_packet, ETH_FRAME_LEN - sizeof(hdr));
+
+    printf("Replacing with original mac %s and sending packet\n", original_mac_addr);
+
+    /* Construct ethernet header */
+    memcpy(hdr->h_dest, original_hdr->h_dest, ETH_ALEN);
+    hdr->h_proto = original_hdr->h_proto;
+    memcpy(hdr->h_source, (ether_aton(original_mac_addr))->ether_addr_octet, ETH_ALEN);
+
+    if (send(client_sock, outgoing_packet, sizeof(outgoing_packet), MSG_CONFIRM) == -1) {
+        perror("send");
+        exit(1);
+    }
+    printf("Sending Data:\n");
+    print_mac_address(hdr->h_source);
+    printf(" --> ");
+    print_mac_address(hdr->h_dest);
+    printf("\n");
+
 }
 
 void modify_and_send_packet(void *packet)
@@ -193,25 +230,46 @@ void modify_and_send_packet(void *packet)
     printf("\n");
 }
 
-void receive_packet()
+void read_callback_from_client(evutil_socket_t sock, short what, void *arg)
 {
     unsigned char buffer[ETH_FRAME_LEN];
     struct ethhdr *hdr;
 
-    while (1) {
-        if (read(client_sock, buffer, ETH_FRAME_LEN) == -1) {
-            perror("read");
-            exit(1);
-        }
+    printf("Read CB... arg %s\n", (char *)arg);
 
-        printf("Got Data:\n");
-        hdr = (struct ethhdr *)buffer;
-        print_mac_address(hdr->h_source);
-        printf(" --> ");
-        print_mac_address(hdr->h_dest);
-        printf("\n");
-        modify_and_send_packet(buffer);
+    if (read((int)sock, buffer, ETH_FRAME_LEN) == -1) {
+        perror("read");
+        exit(1);
     }
+
+    printf("Got Data:\n");
+    hdr = (struct ethhdr *)buffer;
+    print_mac_address(hdr->h_source);
+    printf(" --> ");
+    print_mac_address(hdr->h_dest);
+    printf("\n");
+    modify_and_send_packet(buffer);
+}
+
+void read_callback_from_server(evutil_socket_t sock, short what, void *arg)
+{
+    unsigned char buffer[ETH_FRAME_LEN];
+    struct ethhdr *hdr;
+
+    printf("Read CB... arg %s\n", (char *)arg);
+
+    if (read((int)sock, buffer, ETH_FRAME_LEN) == -1) {
+        perror("read");
+        exit(1);
+    }
+
+    printf("Got Data:\n");
+    hdr = (struct ethhdr *)buffer;
+    print_mac_address(hdr->h_source);
+    printf(" --> ");
+    print_mac_address(hdr->h_dest);
+    printf("\n");
+    replace_with_original_and_send_packet(buffer);
 }
 
 void usage()
@@ -228,7 +286,22 @@ int main(int argc, char *argv[])
     const char server_facing_ifname[] = "eth0";
     const char client_facing_ifname[] = "eth1";
 
+    struct event_config *cfg;
+    struct event_base *base;
+
+    struct event *client_facing_read, *server_facing_read;
+
     srand(time(NULL));
+
+    cfg = event_config_new();
+    event_config_avoid_method(cfg, "select");
+
+    base = event_base_new_with_config(cfg);
+    event_config_free(cfg);
+    if (!base) {
+        printf("ERROR: could not initialize base event\n");
+        exit(1);
+    }
 
     /*
      * We use 2 sockets because we will (probably) receive packets via one
@@ -237,16 +310,28 @@ int main(int argc, char *argv[])
     initialize_server_socket(server_facing_ifname);
     initialize_client_socket(client_facing_ifname);
 
-    atexit(cleanup_on_exit);
-
-    /* TODO: Event based code goes here.
-     *  Things I have thought of for now include:
-     *      1. Sock read.
-     *      2. Sock write.
-     * Until then just call receive_packet which does an infinite loop. :-|
+    /*
+     * We not have 2 sockets, one server-facing and one client-facing.
+     * Register for appropriate events. For now because of the way the
+     * sockets are configured, they are unidirectional. This will change
+     * soon.
+     * XXX Do not register for write callback, receive_packet will send it out...
      */
 
-    receive_packet();
+    client_facing_read = event_new(base, client_sock, EV_TIMEOUT|EV_READ|EV_PERSIST,
+            read_callback_from_client, (char *)"Client facing reading event");
+
+    server_facing_read = event_new(base, server_sock, EV_TIMEOUT|EV_READ|EV_PERSIST,
+            read_callback_from_server, (char *)"Server facing reading event");
+
+    /* Add event and wait forever to event to happen */
+    event_add(client_facing_read, NULL);
+    event_add(server_facing_read, NULL);
+
+    atexit(cleanup_on_exit);
+
+    /* Enter event loop */
+    event_base_dispatch(base);
 
     return 0;
 }
