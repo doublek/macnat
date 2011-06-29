@@ -48,6 +48,14 @@ char * random_chars(char *dst, int size)
     return dst;
 }
 
+void print_mac_address(unsigned char *addr)
+{
+    int i;
+    printf("%02x", addr[0]);
+    for (i=1; i<ETH_ALEN; ++i)
+        printf(":%02x", addr[i]);
+}
+
 void modify_and_send_packet(void *packet)
 {
     const char pattern[] = "00:00:5e";
@@ -58,17 +66,32 @@ void modify_and_send_packet(void *packet)
     struct packet_mreq mreq;
     int send_sock, ifindex, protocol;
 
+    struct ethhdr *original_hdr = (struct ethhdr *)packet;
+    void *ip_packet = packet + sizeof(struct ethhdr *);
+    
+    char outgoing_packet[ETH_FRAME_LEN];
+    struct ethhdr *hdr = (struct ethhdr *)outgoing_packet;
+    void *outgoing_ip_packet = outgoing_packet + sizeof(hdr);
+
+    memset(outgoing_packet, 0, ETH_FRAME_LEN);
+    memcpy(outgoing_ip_packet, ip_packet, ETH_FRAME_LEN - sizeof(hdr));
+
+    sprintf(spoofed_mac_addr, "%s:%s:%s:%s", pattern,
+            random_chars(dst1, sizeof(dst1)),
+            random_chars(dst2, sizeof(dst2)),
+            random_chars(dst3, sizeof(dst3)));
+
     /* FIXME: Hardcoded... Sigh.... */
-    ifindex = if_nametoindex("eth2");
+    ifindex = if_nametoindex("eth0");
     protocol = htons(ETH_P_ALL);
 
     sdl.sll_family = AF_PACKET;
-    sdl.sll_halen = 6; /* FIXME: Magic number */
+    sdl.sll_halen = ETH_ALEN; /* FIXME: Magic number */
     memcpy(sdl.sll_addr, (ether_aton(spoofed_mac_addr))->ether_addr_octet, ETHER_ADDR_LEN);
+    //memcpy(sdl.sll_addr, (ether_aton("00:0c:29:c6:37:13"))->ether_addr_octet, ETHER_ADDR_LEN);
     sdl.sll_ifindex = ifindex;
-    sdl.sll_protocol = 0; /* Not required for sending */
-    sdl.sll_hatype = 0; /* Not required for sending */
-    sdl.sll_pkttype = 0; /* Not required for sending */
+    sdl.sll_protocol = protocol; /* Not required for sending */
+    sdl.sll_hatype = ARPHRD_ETHER; /* Not required for sending */
 
     /*
      * We use 2 sockets because we will (probably) receive packets via one
@@ -87,21 +110,30 @@ void modify_and_send_packet(void *packet)
         exit(1);
     }
 
-    sprintf(spoofed_mac_addr, "%s:%s:%s:%s", pattern,
-            random_chars(dst1, sizeof(dst1)),
-            random_chars(dst2, sizeof(dst2)),
-            random_chars(dst3, sizeof(dst3)));
+    printf("Modifying and sending packet using MAC: %s\n", spoofed_mac_addr);
 
-    printf("Should modify and send packet using MAC: %s... \n"
-            "Doing nothing for now...\n", spoofed_mac_addr);
-}
+    /* Construct ethernet header */
+    memcpy(hdr->h_dest, original_hdr->h_dest, ETH_ALEN);
+    hdr->h_proto = original_hdr->h_proto;
+    memcpy(hdr->h_source, (ether_aton(spoofed_mac_addr))->ether_addr_octet, ETH_ALEN);
 
-void print_mac_address(unsigned char *addr)
-{
-    int i;
-    printf("%02x", addr[0]);
-    for (i=1; i<ETH_ALEN; ++i)
-        printf(":%02x", addr[i]);
+    if (bind(send_sock, (struct sockaddr *)&sdl, sizeof(sdl)) == -1) {
+        perror("bind");
+        exit(1);
+    }
+
+    if (send(send_sock, outgoing_packet, sizeof(outgoing_packet), MSG_CONFIRM) == -1) {
+        perror("send");
+        close(send_sock);
+        exit(1);
+    }
+    printf("Sending Data:\n");
+    print_mac_address(hdr->h_source);
+    printf(" --> ");
+    print_mac_address(hdr->h_dest);
+    printf("\n");
+
+    close(send_sock);
 }
 
 void receive_packet()
@@ -110,11 +142,11 @@ void receive_packet()
     struct packet_mreq mreq;
     int recv_sock, ifindex, protocol;
 
-    unsigned char buffer[ETH_FRAME_LEN];
+    unsigned char buffer[4096];
     struct ethhdr *hdr;
 
     /* FIXME: Hardcoded... Sigh...*/
-    ifindex = if_nametoindex("eth2");
+    ifindex = if_nametoindex("eth1");
     protocol = htons(ETH_P_ALL);
 
     sdl.sll_family = AF_PACKET;
