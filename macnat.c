@@ -24,14 +24,22 @@
 #include <time.h>
 
 #include <net/ethernet.h>
-#include <net/if_arp.h> /* Sigh it is now Linux only */
+#include <net/if_arp.h>
 #include <net/if.h>
 #include <netinet/ether.h>
-#include <netinet/if_ether.h> /* Sigh it is now Linux only */
+#include <netinet/if_ether.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netpacket/packet.h>
 #include <sys/socket.h>
+
+#include "macnat.h"
+
+char * random_chars(char *dst, int size);
+void print_mac_address(unsigned char *addr);
+
+int client_sock;
+int server_sock;
 
 char * random_chars(char *dst, int size)
 {
@@ -56,15 +64,101 @@ void print_mac_address(unsigned char *addr)
         printf(":%02x", addr[i]);
 }
 
+int macnat_create_and_bind_socket(int ifindex, struct sockaddr_ll sdl)
+{
+    struct packet_mreq mreq;
+    int sock;
+
+    int protocol = htons(ETH_P_ALL);
+
+    if ((sock = socket(PF_PACKET, SOCK_RAW, protocol)) == -1) {
+        perror("socket");
+        return -1;
+    }
+
+    /* Make the interface promisuous */
+    mreq.mr_ifindex = ifindex;
+    mreq.mr_type = PACKET_MR_PROMISC;
+
+    if (setsockopt(sock, SOL_SOCKET, PACKET_ADD_MEMBERSHIP, (void *)&mreq, sizeof(mreq)) == -1) {
+        perror("setsockopt");
+        return -1;
+    }
+
+#if 0
+    /* TODO: Nice value for buf. */
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVBUF , NULL, 0) == -1) {
+        perror("setsockopt");
+        exit(1);
+    }
+#endif
+
+    if (bind(sock, (struct sockaddr *)&sdl, sizeof(sdl)) == -1) {
+        perror("bind");
+        return -1;
+    }
+
+    return sock;
+}
+
+void initialize_server_socket(const char *ifname)
+{
+    struct sockaddr_ll sdl;
+    int ifindex, protocol;
+
+    /* FIXME: Hardcoded... Sigh.... */
+    ifindex = if_nametoindex(ifname);
+    protocol = htons(ETH_P_ALL);
+
+    sdl.sll_family = AF_PACKET;
+    sdl.sll_halen = ETH_ALEN; /* FIXME: Magic number */
+    //memcpy(sdl.sll_addr, (ether_aton(spoofed_mac_addr))->ether_addr_octet, ETHER_ADDR_LEN);
+    memcpy(sdl.sll_addr, (ether_aton("00:0c:29:c6:37:13"))->ether_addr_octet, ETHER_ADDR_LEN);
+    sdl.sll_ifindex = ifindex;
+    sdl.sll_protocol = protocol; /* Not required for sending */
+    sdl.sll_hatype = ARPHRD_ETHER; /* Not required for sending */
+
+    server_sock = macnat_create_and_bind_socket(ifindex, sdl);
+    if (server_sock == -1) {
+        printf("Error when creating server socket..\n");
+        exit(1);
+    }
+}
+
+void initialize_client_socket(const char *ifname)
+{
+    struct sockaddr_ll sdl;
+    int ifindex, protocol;
+
+    ifindex = if_nametoindex(ifname);
+    protocol = htons(ETH_P_ALL);
+
+    sdl.sll_family = AF_PACKET;
+    sdl.sll_protocol = protocol;
+    sdl.sll_ifindex = ifindex;
+    sdl.sll_hatype = 0; /* Will be filled for us */
+    sdl.sll_pkttype = 0; /* Will be filled for us */
+    /* sdl.sll_halen and sdl.sll_addr not required for receiveing */
+
+    client_sock = macnat_create_and_bind_socket(ifindex, sdl);
+
+    if (client_sock == -1) {
+        printf("Error when creating client socket..\n");
+        exit(1);
+    }
+}
+
+void cleanup_on_exit()
+{
+    close(server_sock);
+    close(client_sock);
+}
+
 void modify_and_send_packet(void *packet)
 {
     const char pattern[] = "00:00:5e";
     char dst1[3], dst2[3], dst3[3];
     char spoofed_mac_addr[18];
-
-    struct sockaddr_ll sdl;
-    struct packet_mreq mreq;
-    int send_sock, ifindex, protocol;
 
     struct ethhdr *original_hdr = (struct ethhdr *)packet;
     void *ip_packet = packet + sizeof(struct ethhdr *);
@@ -81,35 +175,6 @@ void modify_and_send_packet(void *packet)
             random_chars(dst2, sizeof(dst2)),
             random_chars(dst3, sizeof(dst3)));
 
-    /* FIXME: Hardcoded... Sigh.... */
-    ifindex = if_nametoindex("eth0");
-    protocol = htons(ETH_P_ALL);
-
-    sdl.sll_family = AF_PACKET;
-    sdl.sll_halen = ETH_ALEN; /* FIXME: Magic number */
-    memcpy(sdl.sll_addr, (ether_aton(spoofed_mac_addr))->ether_addr_octet, ETHER_ADDR_LEN);
-    //memcpy(sdl.sll_addr, (ether_aton("00:0c:29:c6:37:13"))->ether_addr_octet, ETHER_ADDR_LEN);
-    sdl.sll_ifindex = ifindex;
-    sdl.sll_protocol = protocol; /* Not required for sending */
-    sdl.sll_hatype = ARPHRD_ETHER; /* Not required for sending */
-
-    /*
-     * We use 2 sockets because we will (probably) receive packets via one
-     * interface and send via another interface.
-     */
-    if ((send_sock = socket(PF_PACKET, SOCK_RAW, protocol)) == -1) {
-        perror("socket");
-        exit(1);
-    }
-
-    mreq.mr_ifindex = ifindex;
-    mreq.mr_type = PACKET_MR_PROMISC;
-
-    if (setsockopt(send_sock, SOL_SOCKET, PACKET_ADD_MEMBERSHIP, (void *)&mreq, sizeof(mreq)) == -1) {
-        perror("setsockopt");
-        exit(1);
-    }
-
     printf("Modifying and sending packet using MAC: %s\n", spoofed_mac_addr);
 
     /* Construct ethernet header */
@@ -117,14 +182,8 @@ void modify_and_send_packet(void *packet)
     hdr->h_proto = original_hdr->h_proto;
     memcpy(hdr->h_source, (ether_aton(spoofed_mac_addr))->ether_addr_octet, ETH_ALEN);
 
-    if (bind(send_sock, (struct sockaddr *)&sdl, sizeof(sdl)) == -1) {
-        perror("bind");
-        exit(1);
-    }
-
-    if (send(send_sock, outgoing_packet, sizeof(outgoing_packet), MSG_CONFIRM) == -1) {
+    if (send(server_sock, outgoing_packet, sizeof(outgoing_packet), MSG_CONFIRM) == -1) {
         perror("send");
-        close(send_sock);
         exit(1);
     }
     printf("Sending Data:\n");
@@ -132,59 +191,15 @@ void modify_and_send_packet(void *packet)
     printf(" --> ");
     print_mac_address(hdr->h_dest);
     printf("\n");
-
-    close(send_sock);
 }
 
 void receive_packet()
 {
-    struct sockaddr_ll sdl;
-    struct packet_mreq mreq;
-    int recv_sock, ifindex, protocol;
-
     unsigned char buffer[ETH_FRAME_LEN];
     struct ethhdr *hdr;
 
-    /* FIXME: Hardcoded... Sigh...*/
-    ifindex = if_nametoindex("eth1");
-    protocol = htons(ETH_P_ALL);
-
-    sdl.sll_family = AF_PACKET;
-    sdl.sll_protocol = protocol;
-    sdl.sll_ifindex = ifindex;
-    sdl.sll_hatype = 0; /* Will be filled for us */
-    sdl.sll_pkttype = 0; /* Will be filled for us */
-    /* sdl.sll_halen and sdl.sll_addr not required for receiveing */
-
-    if ((recv_sock = socket(PF_PACKET, SOCK_RAW, protocol)) == -1) {
-        perror("socket");
-        exit(1);
-    }
-
-    /* Set interface to promisuous mode.*/
-    mreq.mr_ifindex = ifindex;
-    mreq.mr_type = PACKET_MR_PROMISC;
-
-    if (setsockopt(recv_sock, SOL_SOCKET, PACKET_ADD_MEMBERSHIP, (void *)&mreq, sizeof(mreq)) == -1) {
-        perror("setsockopt");
-        exit(1);
-    }
-
-#if 0
-    /* TODO: Nice value for buf. */
-    if (setsockopt(recv_sock, SOL_SOCKET, SO_RCVBUF , NULL, 0) == -1) {
-        perror("setsockopt");
-        exit(1);
-    }
-#endif
-
-    if (bind(recv_sock, (struct sockaddr *)&sdl, sizeof(sdl)) == -1) {
-        perror("bind");
-        exit(1);
-    }
-
     while (1) {
-        if (read(recv_sock, buffer, ETH_FRAME_LEN) == -1) {
+        if (read(client_sock, buffer, ETH_FRAME_LEN) == -1) {
             perror("read");
             exit(1);
         }
@@ -210,7 +225,19 @@ void usage()
 
 int main(int argc, char *argv[])
 {
+    const char server_facing_ifname[] = "eth0";
+    const char client_facing_ifname[] = "eth1";
+
     srand(time(NULL));
+
+    /*
+     * We use 2 sockets because we will (probably) receive packets via one
+     * interface and send via another interface.
+     */
+    initialize_server_socket(server_facing_ifname);
+    initialize_client_socket(client_facing_ifname);
+
+    atexit(cleanup_on_exit);
 
     /* TODO: Event based code goes here.
      *  Things I have thought of for now include:
@@ -218,6 +245,7 @@ int main(int argc, char *argv[])
      *      2. Sock write.
      * Until then just call receive_packet which does an infinite loop. :-|
      */
+
     receive_packet();
 
     return 0;
