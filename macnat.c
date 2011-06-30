@@ -37,7 +37,7 @@
 
 #include "macnat.h"
 
-#define PROTO_TO_USE ETH_P_ARP|ETH_P_IP
+#define PROTO_TO_USE ETH_P_ALL
 
 char * random_chars(char *dst, int size);
 void print_mac_address(unsigned char *addr);
@@ -110,12 +110,11 @@ void initialize_server_socket(const char *ifname)
     struct sockaddr_ll sdl;
     int ifindex, protocol;
 
-    /* FIXME: Hardcoded... Sigh.... */
     ifindex = if_nametoindex(ifname);
     protocol = htons(PROTO_TO_USE);
 
     sdl.sll_family = AF_PACKET;
-    sdl.sll_halen = ETH_ALEN; /* FIXME: Magic number */
+    sdl.sll_halen = ETH_ALEN;
     //memcpy(sdl.sll_addr, (ether_aton(spoofed_mac_addr))->ether_addr_octet, ETHER_ADDR_LEN);
     memcpy(sdl.sll_addr, (ether_aton("00:0c:29:c6:37:13"))->ether_addr_octet, ETHER_ADDR_LEN);
     sdl.sll_ifindex = ifindex;
@@ -158,28 +157,30 @@ void cleanup_on_exit()
     close(client_sock);
 }
 
-void replace_with_original_and_send_packet(void *packet)
+void replace_with_original_and_send_packet(void *packet, int framelen)
 {
     char original_mac_addr[] = "00:0b:5d:8d:6f:c7";
 
-    struct ethhdr *original_hdr = (struct ethhdr *)packet;
-    void *ip_packet = packet + sizeof(struct ethhdr *);
-    
-    char outgoing_packet[ETH_FRAME_LEN];
-    struct ethhdr *hdr = (struct ethhdr *)outgoing_packet;
-    void *outgoing_ip_packet = outgoing_packet + sizeof(hdr);
+    struct ethhdr *hdr = (struct ethhdr *)packet;
 
-    memset(outgoing_packet, 0, ETH_FRAME_LEN);
-    memcpy(outgoing_ip_packet, ip_packet, ETH_FRAME_LEN - sizeof(hdr));
+    int protocol = ntohs(hdr->h_proto);
+
+    if (protocol < 0x05DC) {
+        printf("INFO: Skipping unknown proto %d %x\n", protocol, hdr->h_proto);
+        return;
+    }
+
+    print_mac_address(hdr->h_source);
+    printf(" --> ");
+    print_mac_address(hdr->h_dest);
+    printf("\n");
 
     printf("Replacing with original mac %s and sending packet\n", original_mac_addr);
 
     /* Construct ethernet header */
-    memcpy(hdr->h_dest, original_hdr->h_dest, ETH_ALEN);
-    hdr->h_proto = original_hdr->h_proto;
-    memcpy(hdr->h_source, (ether_aton(original_mac_addr))->ether_addr_octet, ETH_ALEN);
+    memcpy(hdr->h_dest, (ether_aton(original_mac_addr))->ether_addr_octet, ETH_ALEN);
 
-    if (send(client_sock, outgoing_packet, sizeof(outgoing_packet), MSG_CONFIRM) == -1) {
+    if (send(client_sock, packet, framelen, MSG_CONFIRM) == -1) {
         perror("send");
         exit(1);
     }
@@ -191,22 +192,25 @@ void replace_with_original_and_send_packet(void *packet)
 
 }
 
-void modify_and_send_packet(void *packet)
+void modify_and_send_packet(void *packet, int framelen)
 {
     const char pattern[] = "00:00:5e";
     char dst1[3], dst2[3], dst3[3];
     char spoofed_mac_addr[18];
 
-    struct ethhdr *original_hdr = (struct ethhdr *)packet;
-    void *ip_packet = packet + sizeof(struct ethhdr *);
+    struct ethhdr *hdr = (struct ethhdr *)packet;
+
+    int protocol = ntohs(hdr->h_proto);
+
+    if (protocol < 0x05DC) {
+        printf("INFO: Skipping unknown proto %d %x\n", protocol, hdr->h_proto);
+        return;
+    }
+    print_mac_address(hdr->h_source);
+    printf(" --> ");
+    print_mac_address(hdr->h_dest);
+    printf("\n");
     
-    char outgoing_packet[ETH_FRAME_LEN];
-    struct ethhdr *hdr = (struct ethhdr *)outgoing_packet;
-    void *outgoing_ip_packet = outgoing_packet + sizeof(hdr);
-
-    memset(outgoing_packet, 0, ETH_FRAME_LEN);
-    memcpy(outgoing_ip_packet, ip_packet, ETH_FRAME_LEN - sizeof(hdr));
-
     sprintf(spoofed_mac_addr, "%s:%s:%s:%s", pattern,
             random_chars(dst1, sizeof(dst1)),
             random_chars(dst2, sizeof(dst2)),
@@ -214,12 +218,10 @@ void modify_and_send_packet(void *packet)
 
     printf("Modifying and sending packet using MAC: %s\n", spoofed_mac_addr);
 
-    /* Construct ethernet header */
-    memcpy(hdr->h_dest, original_hdr->h_dest, ETH_ALEN);
-    hdr->h_proto = original_hdr->h_proto;
+    /* Replace ethernet header */
     memcpy(hdr->h_source, (ether_aton(spoofed_mac_addr))->ether_addr_octet, ETH_ALEN);
 
-    if (send(server_sock, outgoing_packet, sizeof(outgoing_packet), MSG_CONFIRM) == -1) {
+    if (send(server_sock, packet, framelen, MSG_CONFIRM) == -1) {
         perror("send");
         exit(1);
     }
@@ -235,20 +237,15 @@ void read_callback_from_client(evutil_socket_t sock, short what, void *arg)
     unsigned char buffer[ETH_FRAME_LEN];
     struct ethhdr *hdr;
 
-    printf("Read CB... arg %s\n", (char *)arg);
+    int rv;
 
-    if (read((int)sock, buffer, ETH_FRAME_LEN) == -1) {
+    rv = read((int)sock, buffer, ETH_FRAME_LEN);
+    if (rv == -1) {
         perror("read");
         exit(1);
     }
 
-    printf("Got Data:\n");
-    hdr = (struct ethhdr *)buffer;
-    print_mac_address(hdr->h_source);
-    printf(" --> ");
-    print_mac_address(hdr->h_dest);
-    printf("\n");
-    modify_and_send_packet(buffer);
+    modify_and_send_packet(buffer, rv);
 }
 
 void read_callback_from_server(evutil_socket_t sock, short what, void *arg)
@@ -256,20 +253,15 @@ void read_callback_from_server(evutil_socket_t sock, short what, void *arg)
     unsigned char buffer[ETH_FRAME_LEN];
     struct ethhdr *hdr;
 
-    printf("Read CB... arg %s\n", (char *)arg);
+    int rv;
 
-    if (read((int)sock, buffer, ETH_FRAME_LEN) == -1) {
+    rv = read((int)sock, buffer, ETH_FRAME_LEN);
+    if (rv == -1) {
         perror("read");
         exit(1);
     }
 
-    printf("Got Data:\n");
-    hdr = (struct ethhdr *)buffer;
-    print_mac_address(hdr->h_source);
-    printf(" --> ");
-    print_mac_address(hdr->h_dest);
-    printf("\n");
-    replace_with_original_and_send_packet(buffer);
+    replace_with_original_and_send_packet(buffer, rv);
 }
 
 void usage()
@@ -316,11 +308,11 @@ int main(int argc, char *argv[])
      * sockets are configured, they are unidirectional. This will change
      * soon.
      * XXX Do not register for write callback, receive_packet will send it out...
+     * FIXME Ugly duplicated code for distinguising between client facing and
+     * server facing interfaces... Ughhh... I am ashamed... :(
      */
-
     client_facing_read = event_new(base, client_sock, EV_TIMEOUT|EV_READ|EV_PERSIST,
             read_callback_from_client, (char *)"Client facing reading event");
-
     server_facing_read = event_new(base, server_sock, EV_TIMEOUT|EV_READ|EV_PERSIST,
             read_callback_from_server, (char *)"Server facing reading event");
 
