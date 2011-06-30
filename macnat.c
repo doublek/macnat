@@ -38,12 +38,30 @@
 #include "macnat.h"
 
 #define PROTO_TO_USE ETH_P_ALL
+#define BIG 65535
 
 char * random_chars(char *dst, int size);
 void print_mac_address(unsigned char *addr);
 
 int client_sock;
 int server_sock;
+
+/*
+ * Structure to hold mac address that we will use in our lookup table;
+ */
+struct ip_mac_map {
+    struct ether_addr *mac;
+#if 0
+    /* or */
+    char mac[18];
+#endif
+};
+
+/*
+ * Our mapping 'table'. The last 3 (max) digits in an IP address
+ * will be used to determine the key where our mac address resides.
+ */
+struct ip_mac_map mac_map[BIG];
 
 char * random_chars(char *dst, int size)
 {
@@ -66,6 +84,75 @@ void print_mac_address(unsigned char *addr)
     printf("%02x", addr[0]);
     for (i=1; i<ETH_ALEN; ++i)
         printf(":%02x", addr[i]);
+}
+
+int extract_significant_key_from_ip(struct in_addr ip_addr, unsigned char *ip_packet)
+{
+    int key = 1;
+    char * ip = inet_ntoa(ip_addr);
+    printf("IP: %s\n", ip);
+
+    /* Super hack */
+    char *num, *prev;
+    num = strtok(ip, ".");
+    while (num != NULL) {
+        prev = num;
+        num = strtok(NULL, ".");
+        if (!num)
+            break;
+    }
+    key = atoi(prev);
+
+    return key; /* Doh! */
+}
+
+void get_spoofed_mac_address(void *ip_packet, char *spoofed_mac_address, int protocol)
+{
+    const char pattern[] = "00:00:5e";
+    char dst1[3], dst2[3], dst3[3];
+    char spoofed_mac_addr[18];
+    int key;
+
+    struct ether_addr mac;
+    struct in_addr ip_addr;
+
+    struct iphdr *ip = (struct iphdr *)ip_packet;
+
+    ip_addr.s_addr = ip->saddr;
+
+    printf("Extracting ip info\n");
+    if (protocol == 0x806)
+        key = 512;
+    else if (protocol == 0x800)
+        key = extract_significant_key_from_ip(ip_addr, (unsigned char *)ip_packet);
+    else
+        key == 512;
+    printf("Key: %d\n", key);
+
+    if (mac_map[key].mac != NULL) {
+        char * temp =  ether_ntoa(mac_map[key].mac);
+        printf("Found key %s\n", temp);
+        strncpy(spoofed_mac_address, temp, strlen(temp));
+    }
+    else {
+        /* 
+         * We cannot find a mac address in our table generate
+         * a new one add it to our table/dictionary and return
+         * the generated mac.
+         */
+        sprintf(spoofed_mac_addr, "%s:%s:%s:%s", pattern,
+                random_chars(dst1, sizeof(dst1)),
+                random_chars(dst2, sizeof(dst2)),
+                random_chars(dst3, sizeof(dst3)));
+
+        printf("Generated spoofed first time %s\n", spoofed_mac_addr);
+        mac_map[key].mac = (struct ether_addr *)malloc(sizeof(struct ether_addr *));
+        memcpy(mac_map[key].mac, ether_aton(spoofed_mac_addr), sizeof(struct ether_addr *));
+        printf("Added to table\n");
+        strncpy(spoofed_mac_address, spoofed_mac_addr, strlen(spoofed_mac_addr));
+        printf("Copied\n");
+    }
+
 }
 
 int macnat_create_and_bind_socket(int ifindex, struct sockaddr_ll sdl)
@@ -103,6 +190,14 @@ int macnat_create_and_bind_socket(int ifindex, struct sockaddr_ll sdl)
     }
 
     return sock;
+}
+
+void initialize_map()
+{
+    int i;
+    
+    for (i=0; i<BIG; ++i)
+        mac_map[i].mac = NULL;
 }
 
 void initialize_server_socket(const char *ifname)
@@ -158,6 +253,7 @@ void cleanup_on_exit()
 
 void replace_with_original_and_send_packet(void *packet, int framelen)
 {
+    /* We can make a blind replace here */
     char original_mac_addr[] = "00:0b:5d:8d:6f:c7";
 
     struct ethhdr *hdr = (struct ethhdr *)packet;
@@ -165,7 +261,7 @@ void replace_with_original_and_send_packet(void *packet, int framelen)
     int protocol = ntohs(hdr->h_proto);
 
     if (protocol < 0x05DC) {
-        printf("INFO: Skipping unknown proto %d %x\n", protocol, hdr->h_proto);
+        //printf("INFO: Skipping unknown proto %d %x\n", protocol, hdr->h_proto);
         return;
     }
 
@@ -183,6 +279,7 @@ void replace_with_original_and_send_packet(void *packet, int framelen)
         perror("send");
         exit(1);
     }
+
     printf("Sending Data:\n");
     print_mac_address(hdr->h_source);
     printf(" --> ");
@@ -193,8 +290,6 @@ void replace_with_original_and_send_packet(void *packet, int framelen)
 
 void modify_and_send_packet(void *packet, int framelen)
 {
-    const char pattern[] = "00:00:5e";
-    char dst1[3], dst2[3], dst3[3];
     char spoofed_mac_addr[18];
 
     struct ethhdr *hdr = (struct ethhdr *)packet;
@@ -202,7 +297,7 @@ void modify_and_send_packet(void *packet, int framelen)
     int protocol = ntohs(hdr->h_proto);
 
     if (protocol < 0x05DC) {
-        printf("INFO: Skipping unknown proto %d %x\n", protocol, hdr->h_proto);
+        //printf("INFO: Skipping unknown proto %d %x\n", protocol, hdr->h_proto);
         return;
     }
     print_mac_address(hdr->h_source);
@@ -210,11 +305,8 @@ void modify_and_send_packet(void *packet, int framelen)
     print_mac_address(hdr->h_dest);
     printf("\n");
     
-    sprintf(spoofed_mac_addr, "%s:%s:%s:%s", pattern,
-            random_chars(dst1, sizeof(dst1)),
-            random_chars(dst2, sizeof(dst2)),
-            random_chars(dst3, sizeof(dst3)));
-
+    printf("Getting spoofed mac\n");
+    get_spoofed_mac_address((packet + sizeof(struct ethhdr)), spoofed_mac_addr, protocol);
     printf("Modifying and sending packet using MAC: %s\n", spoofed_mac_addr);
 
     /* Replace ethernet header */
@@ -293,6 +385,8 @@ int main(int argc, char *argv[])
         printf("ERROR: could not initialize base event\n");
         exit(1);
     }
+
+    initialize_map();
 
     /*
      * We use 2 sockets because we will (probably) receive packets via one

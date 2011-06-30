@@ -4,4 +4,6 @@
 extern int client_sock;
 extern int server_sock;
 
+struct ip_mac_map;
+
 #endif
