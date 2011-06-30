@@ -115,7 +115,6 @@ void initialize_server_socket(const char *ifname)
 
     sdl.sll_family = AF_PACKET;
     sdl.sll_halen = ETH_ALEN;
-    //memcpy(sdl.sll_addr, (ether_aton(spoofed_mac_addr))->ether_addr_octet, ETHER_ADDR_LEN);
     memcpy(sdl.sll_addr, (ether_aton("00:0c:29:c6:37:13"))->ether_addr_octet, ETHER_ADDR_LEN);
     sdl.sll_ifindex = ifindex;
     sdl.sll_protocol = protocol; /* Not required for sending */
