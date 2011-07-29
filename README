@@ -1,0 +1,20 @@
+A simple tool to re-write the MAC address of packets that go through this
+daemon. Maintains a dictionary that contains a mapping of the source ip
+address of a packet to a randomize mac address and rewrites the source
+mac address of the packet for outgoing (egress?) packets. Does the reverse
+for incoming (ingress?) packets.
+
+EXAMPLE: 
+  Egress (all source):
+	<00:30:1b:b9:97:d7>/192.168.10.3 --> <00:00:5e:00:04:44>/192.168.10.3
+	<00:30:1b:b9:97:d7>/192.168.10.4 --> <00:00:5e:00:01:44>/192.168.10.4
+	<00:30:1b:b9:97:d7>/192.168.10.5 --> <00:00:5e:00:01:44>/192.168.10.4
+
+  Ingress (all destination):
+    <00:00:5e:00:04:44>/192.168.10.3 --> <00:30:1b:b9:97:d7>/192.168.10.3
+    <00:00:5e:00:01:44>/192.168.10.4 --> <00:30:1b:b9:97:d7>/192.168.10.4
+	<00:00:5e:00:01:44>/192.168.10.4 --> <00:30:1b:b9:97:d7>/192.168.10.5
+
+
+For copyright information please refer to the file named COPYRIGHT in the
+directory where this file is located.
